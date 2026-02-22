@@ -28,6 +28,7 @@ namespace TextToAI.Views
             ApiKeyTextBox.Text = _config.ApiKey;
             HotkeyTextBox.Text = _config.Hotkey;
             PromptTextBox.Text = _config.Prompt;
+            StartWithWindowsCheckBox.IsChecked = AutoStartService.IsAutoStartEnabled();
 
             // Set selected model
             foreach (System.Windows.Controls.ComboBoxItem item in ModelComboBox.Items)
@@ -138,8 +139,10 @@ namespace TextToAI.Views
             _config.Model = (ModelComboBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content.ToString() ?? "gpt-4o";
             _config.Hotkey = HotkeyTextBox.Text;
             _config.Prompt = PromptTextBox.Text;
+            _config.StartWithWindows = StartWithWindowsCheckBox.IsChecked ?? false;
 
             _configService.Save(_config);
+            AutoStartService.SetAutoStart(_config.StartWithWindows);
 
             DialogResult = true;
             Close();

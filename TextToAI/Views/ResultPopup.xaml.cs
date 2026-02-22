@@ -6,7 +6,6 @@ namespace TextToAI.Views
 {
     public partial class ResultPopup : Window
     {
-        private bool _isError;
         private readonly Stopwatch _stopwatch = new();
 
         public ResultPopup()
@@ -26,7 +25,6 @@ namespace TextToAI.Views
         public void ShowResult(string text)
         {
             _stopwatch.Stop();
-            _isError = false;
             LoadingPanel.Visibility = Visibility.Collapsed;
             ResultTextBox.Text = text;
             ResultTextBox.Visibility = Visibility.Visible;
@@ -38,7 +36,6 @@ namespace TextToAI.Views
         public void ShowError(string message)
         {
             _stopwatch.Stop();
-            _isError = true;
             LoadingPanel.Visibility = Visibility.Collapsed;
             ResultTextBox.Text = message;
             ResultTextBox.Visibility = Visibility.Visible;
