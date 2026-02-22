@@ -2,6 +2,9 @@
 using System.Windows;
 using System.Windows.Controls;
 using Hardcodet.Wpf.TaskbarNotification;
+using TextToAI.Models;
+using TextToAI.Services;
+using TextToAI.Views;
 
 namespace TextToAI
 {
@@ -10,6 +13,9 @@ namespace TextToAI
         private const string MutexName = "TextToAI_SingleInstance_Mutex";
         private Mutex? _mutex;
         private TaskbarIcon? _trayIcon;
+        private ConfigService? _configService;
+        private HotkeyService? _hotkeyService;
+        private AppConfig? _config;
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -24,8 +30,84 @@ namespace TextToAI
                 return;
             }
 
+            // Load configuration
+            _configService = new ConfigService();
+            _config = _configService.Load();
+
             // Initialize system tray icon
             InitializeTrayIcon();
+
+            // Register global hotkey
+            InitializeHotkey();
+        }
+
+        private void InitializeHotkey()
+        {
+            _hotkeyService = new HotkeyService();
+            _hotkeyService.HotkeyPressed += OnHotkeyPressed;
+
+            if (!string.IsNullOrEmpty(_config?.Hotkey))
+            {
+                if (!_hotkeyService.Register(_config.Hotkey))
+                {
+                    _trayIcon?.ShowBalloonTip("TextToAI", $"Failed to register hotkey: {_config.Hotkey}", BalloonIcon.Warning);
+                }
+            }
+        }
+
+        private readonly TextCaptureService _textCaptureService = new();
+        private readonly OpenAiService _openAiService = new();
+        private ResultPopup? _resultPopup;
+
+        private async void OnHotkeyPressed(object? sender, EventArgs e)
+        {
+            // Check if API key is configured
+            if (string.IsNullOrWhiteSpace(_config?.ApiKey))
+            {
+                ShowResultPopup();
+                _resultPopup?.ShowError("Please configure API key in Settings");
+                return;
+            }
+
+            // Capture selected text
+            var capturedText = await _textCaptureService.CaptureSelectedTextAsync();
+
+            if (string.IsNullOrWhiteSpace(capturedText))
+            {
+                ShowResultPopup();
+                _resultPopup?.ShowError("No text selected");
+                return;
+            }
+
+            // Show popup with loading state
+            ShowResultPopup();
+            _resultPopup?.ShowLoading();
+
+            // Send to OpenAI
+            var result = await _openAiService.SendAsync(capturedText, _config!);
+
+            // Show result or error
+            if (result.IsSuccess)
+            {
+                _resultPopup?.ShowResult(result.Content!);
+            }
+            else
+            {
+                _resultPopup?.ShowError(result.ErrorMessage!);
+            }
+        }
+
+        private void ShowResultPopup()
+        {
+            // Close existing popup if open
+            if (_resultPopup != null && _resultPopup.IsVisible)
+            {
+                _resultPopup.Close();
+            }
+
+            _resultPopup = new ResultPopup();
+            _resultPopup.Show();
+            _resultPopup.Activate();
         }
 
         private void InitializeTrayIcon()
@@ -52,10 +134,30 @@ namespace TextToAI
             };
         }
 
+        private SettingsWindow? _settingsWindow;
+
         private void OnSettingsClick(object sender, RoutedEventArgs e)
         {
-            // Placeholder - will open SettingsWindow in Task 4
-            MessageBox.Show("Settings window coming soon!", "TextToAI", MessageBoxButton.OK, MessageBoxImage.Information);
+            // Prevent multiple settings windows
+            if (_settingsWindow != null && _settingsWindow.IsVisible)
+            {
+                _settingsWindow.Activate();
+                return;
+            }
+
+            _settingsWindow = new SettingsWindow();
+            if (_settingsWindow.ShowDialog() == true)
+            {
+                // Reload config and re-register hotkey
+                _config = _configService?.Load();
+                if (_hotkeyService != null && !string.IsNullOrEmpty(_config?.Hotkey))
+                {
+                    if (!_hotkeyService.Register(_config.Hotkey))
+                    {
+                        _trayIcon?.ShowBalloonTip("TextToAI", $"Failed to register hotkey: {_config.Hotkey}", BalloonIcon.Warning);
+                    }
+                }
+            }
         }
 
         private void OnExitClick(object sender, RoutedEventArgs e)
@@ -65,6 +167,7 @@ namespace TextToAI
 
         protected override void OnExit(ExitEventArgs e)
         {
+            _hotkeyService?.Dispose();
             _trayIcon?.Dispose();
             _mutex?.ReleaseMutex();
             _mutex?.Dispose();
