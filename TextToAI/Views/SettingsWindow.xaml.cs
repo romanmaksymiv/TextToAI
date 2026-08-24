@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using TextToAI.Models;
 using TextToAI.Services;
@@ -9,8 +10,18 @@ namespace TextToAI.Views
     {
         private readonly ConfigService _configService;
         private readonly AppConfig _config;
-        private bool _isRecordingHotkey;
         private bool _isApiKeyVisible;
+        private bool _isLoading;
+
+        // Which hotkey box is currently capturing keystrokes, if any.
+        private TextBox? _recordingTarget;
+        private Button? _recordingButton;
+
+        // Keys and models are remembered per provider so switching back and forth
+        // in the dialog never blanks the other provider's settings.
+        private readonly Dictionary<LlmProvider, string> _apiKeys = [];
+        private readonly Dictionary<LlmProvider, string> _models = [];
+        private LlmProvider _currentProvider;
 
         public SettingsWindow()
         {
@@ -22,24 +33,85 @@ namespace TextToAI.Views
             LoadConfigToUI();
         }
 
+        private TextBox[] HotkeyBoxes => [Hotkey1TextBox, Hotkey2TextBox];
+
+        private TextBox[] PromptBoxes => [Prompt1TextBox, Prompt2TextBox];
+
         private void LoadConfigToUI()
         {
-            ApiKeyPasswordBox.Password = _config.ApiKey;
-            ApiKeyTextBox.Text = _config.ApiKey;
-            HotkeyTextBox.Text = _config.Hotkey;
-            PromptTextBox.Text = _config.Prompt;
+            _isLoading = true;
+
+            _apiKeys[LlmProvider.OpenRouter] = _config.OpenRouterApiKey;
+            _apiKeys[LlmProvider.OpenAI] = _config.OpenAiApiKey;
+
+            foreach (var info in ProviderCatalog.All)
+            {
+                _models[info.Provider] = info.DefaultModel;
+            }
+            _models[_config.Provider] = _config.Model;
+
+            _currentProvider = _config.Provider;
+
+            ProviderComboBox.ItemsSource = ProviderCatalog.All;
+            ProviderComboBox.SelectedItem = ProviderCatalog.Get(_config.Provider);
+
+            for (var i = 0; i < HotkeyBoxes.Length; i++)
+            {
+                var action = i < _config.Actions.Count ? _config.Actions[i] : new PromptAction();
+                HotkeyBoxes[i].Text = action.Hotkey;
+                PromptBoxes[i].Text = action.Prompt;
+            }
+
             StartWithWindowsCheckBox.IsChecked = AutoStartService.IsAutoStartEnabled();
 
-            // Set selected model
-            foreach (System.Windows.Controls.ComboBoxItem item in ModelComboBox.Items)
-            {
-                if (item.Content.ToString() == _config.Model)
-                {
-                    ModelComboBox.SelectedItem = item;
-                    break;
-                }
-            }
+            _isLoading = false;
+
+            ApplyProvider(_config.Provider);
         }
+
+        /// <summary>
+        /// Points the key box, label, hint and model list at the given provider.
+        /// </summary>
+        private void ApplyProvider(LlmProvider provider)
+        {
+            var info = ProviderCatalog.Get(provider);
+
+            ApiKeyLabel.Text = $"{info.DisplayName} API Key";
+            ApiKeyHint.Text = $"Get a key at {info.KeysUrl}";
+
+            var key = _apiKeys.TryGetValue(provider, out var stored) ? stored : string.Empty;
+            ApiKeyPasswordBox.Password = key;
+            ApiKeyTextBox.Text = key;
+
+            ModelComboBox.ItemsSource = info.ModelPresets;
+            ModelComboBox.Text = _models.TryGetValue(provider, out var model) && !string.IsNullOrWhiteSpace(model)
+                ? model
+                : info.DefaultModel;
+
+            _currentProvider = provider;
+        }
+
+        private void Provider_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            if (_isLoading || ProviderComboBox.SelectedItem is not ProviderInfo selected)
+            {
+                return;
+            }
+
+            if (selected.Provider == _currentProvider)
+            {
+                return;
+            }
+
+            // Stash whatever is on screen before swapping providers.
+            _apiKeys[_currentProvider] = CurrentApiKey();
+            _models[_currentProvider] = ModelComboBox.Text;
+
+            ApplyProvider(selected.Provider);
+        }
+
+        private string CurrentApiKey() =>
+            _isApiKeyVisible ? ApiKeyTextBox.Text : ApiKeyPasswordBox.Password;
 
         private void ToggleApiKeyVisibility_Click(object sender, RoutedEventArgs e)
         {
@@ -63,22 +135,54 @@ namespace TextToAI.Views
 
         private void RecordHotkey_Click(object sender, RoutedEventArgs e)
         {
-            if (_isRecordingHotkey)
+            var button = (Button)sender;
+
+            // Clicking the button that is already recording cancels it.
+            if (_recordingButton == button)
             {
-                _isRecordingHotkey = false;
-                RecordHotkeyButton.Content = "Record";
+                StopRecording(restore: true);
                 return;
             }
 
-            _isRecordingHotkey = true;
-            RecordHotkeyButton.Content = "Press keys...";
-            HotkeyTextBox.Text = "Waiting for input...";
-            HotkeyTextBox.Focus();
+            StopRecording(restore: true);
+
+            _recordingButton = button;
+            _recordingTarget = button == RecordHotkey1Button ? Hotkey1TextBox : Hotkey2TextBox;
+            _previousHotkeyText = _recordingTarget.Text;
+
+            button.Content = "Press keys...";
+            _recordingTarget.Text = "Waiting for input...";
+            _recordingTarget.Focus();
+        }
+
+        private string _previousHotkeyText = string.Empty;
+
+        private void StopRecording(bool restore)
+        {
+            if (_recordingButton == null || _recordingTarget == null)
+            {
+                return;
+            }
+
+            if (restore)
+            {
+                _recordingTarget.Text = _previousHotkeyText;
+            }
+
+            _recordingButton.Content = "Record";
+            _recordingButton = null;
+            _recordingTarget = null;
+        }
+
+        private void ClearHotkey2_Click(object sender, RoutedEventArgs e)
+        {
+            StopRecording(restore: true);
+            Hotkey2TextBox.Text = string.Empty;
         }
 
         protected override void OnPreviewKeyDown(KeyEventArgs e)
         {
-            if (!_isRecordingHotkey)
+            if (_recordingTarget == null)
             {
                 base.OnPreviewKeyDown(e);
                 return;
@@ -99,8 +203,15 @@ namespace TextToAI.Views
             var modifiers = Keyboard.Modifiers;
             var key = e.Key == Key.System ? e.SystemKey : e.Key;
 
+            // Escape cancels recording and keeps the previous hotkey.
+            if (key == Key.Escape && modifiers == ModifierKeys.None)
+            {
+                StopRecording(restore: true);
+                return;
+            }
+
             // Build hotkey string
-            var parts = new System.Collections.Generic.List<string>();
+            var parts = new List<string>();
 
             if ((modifiers & ModifierKeys.Control) != 0)
                 parts.Add("Ctrl");
@@ -113,32 +224,65 @@ namespace TextToAI.Views
 
             parts.Add(key.ToString());
 
-            HotkeyTextBox.Text = string.Join("+", parts);
-            _isRecordingHotkey = false;
-            RecordHotkeyButton.Content = "Record";
+            _recordingTarget.Text = string.Join("+", parts);
+            StopRecording(restore: false);
         }
 
         private void Save_Click(object sender, RoutedEventArgs e)
         {
-            // Get API key from visible control
-            var apiKey = _isApiKeyVisible ? ApiKeyTextBox.Text : ApiKeyPasswordBox.Password;
+            StopRecording(restore: true);
 
-            if (string.IsNullOrWhiteSpace(apiKey))
+            var provider = (ProviderComboBox.SelectedItem as ProviderInfo)?.Provider ?? _currentProvider;
+            var info = ProviderCatalog.Get(provider);
+
+            _apiKeys[provider] = CurrentApiKey();
+            _models[provider] = ModelComboBox.Text;
+
+            if (string.IsNullOrWhiteSpace(_apiKeys[provider]))
             {
-                MessageBox.Show(this, "Please enter an API key.", "Validation Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Invalid($"Please enter your {info.DisplayName} API key.");
                 return;
             }
 
-            if (string.IsNullOrWhiteSpace(HotkeyTextBox.Text) || HotkeyTextBox.Text == "Waiting for input...")
+            var actions = new List<PromptAction>();
+            for (var i = 0; i < HotkeyBoxes.Length; i++)
             {
-                MessageBox.Show(this, "Please set a hotkey.", "Validation Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                actions.Add(new PromptAction
+                {
+                    Hotkey = NormalizeHotkey(HotkeyBoxes[i].Text),
+                    Prompt = PromptBoxes[i].Text
+                });
+            }
+
+            if (string.IsNullOrWhiteSpace(actions[0].Hotkey))
+            {
+                Invalid("Please set a hotkey for Action 1.");
                 return;
             }
 
-            _config.ApiKey = apiKey;
-            _config.Model = (ModelComboBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content.ToString() ?? "gpt-4o";
-            _config.Hotkey = HotkeyTextBox.Text;
-            _config.Prompt = PromptTextBox.Text;
+            for (var i = 0; i < actions.Count; i++)
+            {
+                if (!string.IsNullOrWhiteSpace(actions[i].Hotkey) && string.IsNullOrWhiteSpace(actions[i].Prompt))
+                {
+                    Invalid($"Action {i + 1} has a hotkey but no prompt.");
+                    return;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(actions[1].Hotkey) &&
+                actions[0].Hotkey.Equals(actions[1].Hotkey, StringComparison.OrdinalIgnoreCase))
+            {
+                Invalid("Action 1 and Action 2 use the same hotkey. Pick a different one.");
+                return;
+            }
+
+            var model = _models[provider].Trim();
+
+            _config.Provider = provider;
+            _config.OpenRouterApiKey = _apiKeys.TryGetValue(LlmProvider.OpenRouter, out var orKey) ? orKey : string.Empty;
+            _config.OpenAiApiKey = _apiKeys.TryGetValue(LlmProvider.OpenAI, out var oaKey) ? oaKey : string.Empty;
+            _config.Model = string.IsNullOrWhiteSpace(model) ? info.DefaultModel : model;
+            _config.Actions = actions;
             _config.StartWithWindows = StartWithWindowsCheckBox.IsChecked ?? false;
 
             _configService.Save(_config);
@@ -147,6 +291,15 @@ namespace TextToAI.Views
             DialogResult = true;
             Close();
         }
+
+        /// <summary>A half-finished recording leaves placeholder text in the box; treat it as empty.</summary>
+        private static string NormalizeHotkey(string text) =>
+            string.IsNullOrWhiteSpace(text) || text == "Waiting for input..."
+                ? string.Empty
+                : text.Trim();
+
+        private void Invalid(string message) =>
+            MessageBox.Show(this, message, "Validation Error", MessageBoxButton.OK, MessageBoxImage.Warning);
 
         private void Cancel_Click(object sender, RoutedEventArgs e)
         {

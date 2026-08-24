@@ -2,48 +2,79 @@ using System.Windows;
 using System.Windows.Input;
 using System.Windows.Interop;
 using TextToAI.Interop;
+using TextToAI.Models;
 
 namespace TextToAI.Services
 {
+    public class HotkeyPressedEventArgs(int actionIndex) : EventArgs
+    {
+        /// <summary>Index into AppConfig.Actions of the action whose hotkey fired.</summary>
+        public int ActionIndex { get; } = actionIndex;
+    }
+
     public class HotkeyService : IDisposable
     {
-        private const int HOTKEY_ID = 9000;
+        // Each action gets BaseHotkeyId + its index, so WM_HOTKEY tells us which one fired.
+        private const int BaseHotkeyId = 9000;
         private HwndSource? _hwndSource;
-        private bool _isRegistered;
+        private readonly List<int> _registeredIds = [];
 
-        public event EventHandler? HotkeyPressed;
+        public event EventHandler<HotkeyPressedEventArgs>? HotkeyPressed;
 
-        public bool Register(string hotkeyString)
+        /// <summary>
+        /// Registers every action that has a hotkey, replacing any previous registration.
+        /// Actions with a blank hotkey are skipped.
+        /// </summary>
+        /// <returns>The hotkey strings that could not be registered (in use, or unparseable).</returns>
+        public IReadOnlyList<string> RegisterAll(IReadOnlyList<PromptAction> actions)
         {
-            if (_isRegistered)
-            {
-                Unregister();
-            }
+            UnregisterAll();
 
-            if (!ParseHotkey(hotkeyString, out uint modifiers, out uint vk))
-            {
-                return false;
-            }
+            var failed = new List<string>();
 
             // Create a hidden window to receive hotkey messages
             EnsureHwndSource();
 
-            if (_hwndSource == null)
+            for (var i = 0; i < actions.Count; i++)
             {
-                return false;
+                var hotkeyString = actions[i].Hotkey;
+
+                if (string.IsNullOrWhiteSpace(hotkeyString))
+                {
+                    continue;
+                }
+
+                if (_hwndSource == null || !ParseHotkey(hotkeyString, out uint modifiers, out uint vk))
+                {
+                    failed.Add(hotkeyString);
+                    continue;
+                }
+
+                var id = BaseHotkeyId + i;
+                if (NativeMethods.RegisterHotKey(_hwndSource.Handle, id, modifiers | NativeMethods.MOD_NOREPEAT, vk))
+                {
+                    _registeredIds.Add(id);
+                }
+                else
+                {
+                    failed.Add(hotkeyString);
+                }
             }
 
-            _isRegistered = NativeMethods.RegisterHotKey(_hwndSource.Handle, HOTKEY_ID, modifiers | NativeMethods.MOD_NOREPEAT, vk);
-            return _isRegistered;
+            return failed;
         }
 
-        public void Unregister()
+        public void UnregisterAll()
         {
-            if (_isRegistered && _hwndSource != null)
+            if (_hwndSource != null)
             {
-                NativeMethods.UnregisterHotKey(_hwndSource.Handle, HOTKEY_ID);
-                _isRegistered = false;
+                foreach (var id in _registeredIds)
+                {
+                    NativeMethods.UnregisterHotKey(_hwndSource.Handle, id);
+                }
             }
+
+            _registeredIds.Clear();
         }
 
         private void EnsureHwndSource()
@@ -69,9 +100,9 @@ namespace TextToAI.Services
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (msg == NativeMethods.WM_HOTKEY && wParam.ToInt32() == HOTKEY_ID)
+            if (msg == NativeMethods.WM_HOTKEY && _registeredIds.Contains(wParam.ToInt32()))
             {
-                HotkeyPressed?.Invoke(this, EventArgs.Empty);
+                HotkeyPressed?.Invoke(this, new HotkeyPressedEventArgs(wParam.ToInt32() - BaseHotkeyId));
                 handled = true;
             }
             return IntPtr.Zero;
@@ -127,7 +158,7 @@ namespace TextToAI.Services
 
         public void Dispose()
         {
-            Unregister();
+            UnregisterAll();
             _hwndSource?.RemoveHook(WndProc);
             _hwndSource?.Dispose();
             _hwndSource = null;

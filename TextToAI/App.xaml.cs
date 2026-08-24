@@ -46,26 +46,46 @@ namespace TextToAI
             _hotkeyService = new HotkeyService();
             _hotkeyService.HotkeyPressed += OnHotkeyPressed;
 
-            if (!string.IsNullOrEmpty(_config?.Hotkey))
+            RegisterHotkeys();
+        }
+
+        private void RegisterHotkeys()
+        {
+            if (_hotkeyService == null || _config == null)
             {
-                if (!_hotkeyService.Register(_config.Hotkey))
-                {
-                    _trayIcon?.ShowBalloonTip("TextToAI", $"Failed to register hotkey: {_config.Hotkey}", BalloonIcon.Warning);
-                }
+                return;
+            }
+
+            var failed = _hotkeyService.RegisterAll(_config.Actions);
+
+            if (failed.Count > 0)
+            {
+                var list = string.Join(", ", failed);
+                _trayIcon?.ShowBalloonTip("TextToAI", $"Failed to register hotkey: {list}", BalloonIcon.Warning);
             }
         }
 
         private readonly TextCaptureService _textCaptureService = new();
-        private readonly OpenAiService _openAiService = new();
+        private readonly LlmService _llmService = new();
         private ResultPopup? _resultPopup;
 
-        private async void OnHotkeyPressed(object? sender, EventArgs e)
+        private async void OnHotkeyPressed(object? sender, HotkeyPressedEventArgs e)
         {
-            // Check if API key is configured
-            if (string.IsNullOrWhiteSpace(_config?.ApiKey))
+            var action = _config != null && e.ActionIndex >= 0 && e.ActionIndex < _config.Actions.Count
+                ? _config.Actions[e.ActionIndex]
+                : null;
+
+            if (action == null)
             {
+                return;
+            }
+
+            // Check if API key is configured for the selected provider
+            if (string.IsNullOrWhiteSpace(_config?.ActiveApiKey))
+            {
+                var providerName = ProviderCatalog.Get(_config?.Provider ?? LlmProvider.OpenRouter).DisplayName;
                 ShowResultPopup();
-                _resultPopup?.ShowError("Please configure API key in Settings");
+                _resultPopup?.ShowError($"Please configure your {providerName} API key in Settings");
                 return;
             }
 
@@ -83,8 +103,8 @@ namespace TextToAI
             ShowResultPopup();
             _resultPopup?.ShowLoading();
 
-            // Send to OpenAI
-            var result = await _openAiService.SendAsync(capturedText, _config!);
+            // Send to the configured provider
+            var result = await _llmService.SendAsync(capturedText, _config!, action.Prompt);
 
             // Show result or error
             if (result.IsSuccess)
@@ -148,15 +168,9 @@ namespace TextToAI
             _settingsWindow = new SettingsWindow();
             if (_settingsWindow.ShowDialog() == true)
             {
-                // Reload config and re-register hotkey
+                // Reload config and re-register hotkeys
                 _config = _configService?.Load();
-                if (_hotkeyService != null && !string.IsNullOrEmpty(_config?.Hotkey))
-                {
-                    if (!_hotkeyService.Register(_config.Hotkey))
-                    {
-                        _trayIcon?.ShowBalloonTip("TextToAI", $"Failed to register hotkey: {_config.Hotkey}", BalloonIcon.Warning);
-                    }
-                }
+                RegisterHotkeys();
             }
         }
 
